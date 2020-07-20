@@ -5,6 +5,7 @@ use std;
 use std::iter::FromIterator;
 
 #[pyclass(name=ray)]
+#[derive(Clone)]
 struct Ray {
     power: f64,
     pos: na::Vector3<f64>,
@@ -24,6 +25,19 @@ impl Ray {
             color: na::Vector3::from_vec(pcolor),
             shadow: false
         }
+    }
+    fn propagate(&self, polyhedron: &Polyhedron) -> PyResult<()> {
+        // later replace polyhedron with some kind of scene struct
+        let faces = polyhedron.faces.clone();
+        let mut intersections: Vec<na::Vector3<f64>> = vec![];
+        for face in faces.into_iter() {
+            let point_of_intersection = face.intersection(self);
+            if face.is_inside(&point_of_intersection) {
+                println!("poi is {}", point_of_intersection);
+                // intersections.push(point_of_intersection.clone());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -121,6 +135,7 @@ fn normalize(vector: na::Vector3<f64>) -> na::Vector3<f64> {
     vector / norm
 }
 
+#[derive(Clone)]
 struct Polygon {
     vertices: na::DMatrix<f64>,
     normal: na::Vector3<f64>
@@ -136,12 +151,39 @@ impl Polygon {
         normal = normalize(normal);
         Polygon { 
             vertices: vertices_matrix,
-            normal: normal
+            normal: normal,
         }
     }
-    // fn intersection(self, ray: Ray) -> na::Vector3<f64> {
-    //     let t: f64 = 
-    // }
+    fn intersection(&self, ray: &Ray) -> na::Vector3<f64> {
+        let point_on_plane = self.get_vertex(0);
+        let t: f64 = -(self.normal.dot(&point_on_plane) - self.normal.dot(&ray.pos))/self.normal.dot(&ray.dir);
+        ray.pos+ray.dir*t
+    }
+    fn get_vertex(&self, vertex_index: usize) -> na::Vector3<f64> {
+        let point = self.vertices.row(vertex_index).transpose();
+        let mut return_vec: na::Vector3<f64> = na::Vector3::zeros();
+        return_vec.copy_from(&point);
+        return_vec
+    }
+    fn is_inside(&self, point_of_intersection: &na::Vector3<f64>) -> bool {
+        let mut edges: Vec<na::Vector3<f64>> = vec![];
+        edges.push(self.get_vertex(1)-self.get_vertex(0));
+        edges.push(self.get_vertex(2)-self.get_vertex(1));
+        edges.push(self.get_vertex(0)-self.get_vertex(2));
+        let mut results: Vec<f64> = vec![0.0, 0.0, 0.0];
+        for (edge_num, edge) in edges.into_iter().enumerate() {
+            let test = self.get_vertex(edge_num) - point_of_intersection;
+            results[edge_num] = edge.dot(&test);
+        }
+        let mut inside_flag = true;
+        println!("{:?}", results);
+        for result in results {
+            if result > 0.0 || result.is_nan() || result.is_infinite() {
+                inside_flag = false;
+            }
+        }
+        inside_flag
+    }
 }
 
 
