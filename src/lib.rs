@@ -28,7 +28,7 @@ impl Ray {
 }
 
 struct RawGeometric {
-    raw_obj_vertices: Vec<na::Vector3<f64>>,
+    raw_obj_vertices: Vec<na::RowVector3<f64>>,
     raw_obj_faces: Vec<Vec<usize>>
 }
 
@@ -37,24 +37,35 @@ impl RawGeometric {
         RawGeometric { raw_obj_vertices: vec![], raw_obj_faces: vec![] }
     }
     fn convert(self) -> Polyhedron {
-        let mut polygon_list: Vec<Polygon> = vec![];
-        for index_vector in self.raw_obj_faces.into_iter() {
-            let M_rows: usize = 3;
-            let N_cols: usize = index_vector.len();
-            let mut vertices_matrix: na::DMatrix<f64> = na::DMatrix::zeros(M_rows, N_cols);
-            for (colnum, index) in index_vector.into_iter().enumerate() {
-                let col = self.raw_obj_vertices[index];
-                vertices_matrix.set_column(colnum, &col);
+        let position: na::Vector3<f64> = na::Vector3::new(0.0, 0.0, 0.0);
+        let mut polyhedron_face_list: Vec<Polygon> = vec![];
+        let mut polyhedron_vertices_matrix: na::DMatrix<f64> = na::DMatrix::zeros(self.raw_obj_vertices.len(), 3);
+        let mut polyhedron_indices_matrix: na::DMatrix<usize> = na::DMatrix::zeros(self.raw_obj_faces.len(), 3);
+        for (index_num, index_vector) in self.raw_obj_faces.into_iter().enumerate() {
+            let rv: na::RowVector3<usize> = na::RowVector3::from_vec(index_vector.clone());
+            polyhedron_indices_matrix.set_row(index_num, &rv);
+            let M_rows: usize = index_vector.len();
+            let N_cols: usize = 3;
+            let mut polygon_vertices_matrix: na::DMatrix<f64> = na::DMatrix::zeros(M_rows, N_cols);
+            for (rownum, index) in index_vector.into_iter().enumerate() {
+                let row = self.raw_obj_vertices[index];
+                polygon_vertices_matrix.set_row(rownum, &row);
             }
-            polygon_list.push(Polygon::new(vertices_matrix));
+            polyhedron_face_list.push(Polygon::new(polygon_vertices_matrix));
         }
-        Polyhedron { faces: polygon_list }
+        for (vertex_num, vertex_vector) in self.raw_obj_vertices.into_iter().enumerate() {
+            polyhedron_vertices_matrix.set_row(vertex_num, &vertex_vector);
+        }
+        Polyhedron { faces: polyhedron_face_list, vertices: polyhedron_vertices_matrix, indices: polyhedron_indices_matrix, position: position }
     }
 }
 
 #[pyclass(name=poly3d)]
 struct Polyhedron {
-    faces: Vec<Polygon>
+    faces: Vec<Polygon>,
+    vertices: na::DMatrix<f64>,
+    indices: na::DMatrix<usize>,
+    position: na::Vector3<f64>
 }
 
 #[pymethods]
@@ -73,7 +84,7 @@ impl Polyhedron {
         for line in document.lines().into_iter() {
     
             if vertex_token.is_match(line) {
-                let mut coords: na::Vector3<f64> = na::Vector3::zeros();
+                let mut coords: na::RowVector3<f64> = na::RowVector3::zeros();
                 for (n, word) in line.split(" ").enumerate() {
                     if n > 0 {
                         let cap = num_token.captures(word).unwrap();
@@ -104,14 +115,33 @@ impl Polyhedron {
     }
 }
 
+fn normalize(vector: na::Vector3<f64>) -> na::Vector3<f64> {
+    let norm: f64 = (vector[0].powf(2.0) + vector[1].powf(2.0) + vector[2].powf(2.0)).sqrt();
+    assert![norm > 0.0];
+    vector / norm
+}
+
 struct Polygon {
-    vertices: na::DMatrix<f64>
+    vertices: na::DMatrix<f64>,
+    normal: na::Vector3<f64>
 }
 
 impl Polygon {
     fn new(vertices_matrix: na::DMatrix<f64>) -> Polygon {
-        Polygon { vertices: vertices_matrix }
+        let edge_0 = vertices_matrix.row(1) - vertices_matrix.row(0);
+        let edge_1 = vertices_matrix.row(2) - vertices_matrix.row(1);
+        let mut cross_product = edge_0.transpose().cross(&edge_1.transpose());
+        let mut normal: na::Vector3<f64> = na::Vector3::zeros();
+        normal.copy_from(&cross_product);
+        normal = normalize(normal);
+        Polygon { 
+            vertices: vertices_matrix,
+            normal: normal
+        }
     }
+    // fn intersection(self, ray: Ray) -> na::Vector3<f64> {
+    //     let t: f64 = 
+    // }
 }
 
 
