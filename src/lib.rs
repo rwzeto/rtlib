@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 use regex as re;
 use std;
 use std::iter::FromIterator;
+use pyo3::types::{PyList};
 
 #[pyclass(name=ray)]
 #[derive(Clone)]
@@ -26,15 +27,18 @@ impl Ray {
             shadow: false
         }
     }
-    fn propagate(&self, polyhedron: &Polyhedron) -> PyResult<()> {
-        // later replace polyhedron with some kind of scene struct
-        let faces = polyhedron.faces.clone();
-        let mut intersections: Vec<na::Vector3<f64>> = vec![];
-        for face in faces.into_iter() {
-            let point_of_intersection = face.intersection(self);
-            if face.is_inside(&point_of_intersection) {
-                println!("poi is {}", point_of_intersection);
-                // intersections.push(point_of_intersection.clone());
+    fn propagate(&self, scene: &Scene) -> PyResult<()> {
+        // todo: add filtering 
+        for polyhedron in scene.objects.clone().into_iter() {
+            let faces = polyhedron.faces.clone();
+            let mut intersections: Vec<na::Vector3<f64>> = vec![];
+            for face in faces.into_iter() {
+                let point_of_intersection = face.intersection(self);
+                if face.is_inside(&point_of_intersection) {
+                    println!("poi is {}", point_of_intersection);
+                    intersections.push(point_of_intersection);
+                    // surfaces.push(&face);
+                }
             }
         }
         Ok(())
@@ -74,7 +78,25 @@ impl RawGeometric {
     }
 }
 
+#[pyclass(name=scene)]
+struct Scene {
+    objects: Vec<Polyhedron>
+}
+
+#[pymethods]
+impl Scene {
+    #[new]
+    fn new() -> Scene {
+        Scene { objects: vec![] }
+    }
+    fn add(&mut self, polyhedron: Polyhedron) -> PyResult<()> {
+        self.objects.push(polyhedron);
+        Ok(())
+    }
+}
+
 #[pyclass(name=poly3d)]
+#[derive(Clone)]
 struct Polyhedron {
     faces: Vec<Polygon>,
     vertices: na::DMatrix<f64>,
@@ -135,6 +157,14 @@ fn normalize(vector: na::Vector3<f64>) -> na::Vector3<f64> {
     vector / norm
 }
 
+fn normal_check(v1: na::Vector3<f64>, v2: na::Vector3<f64>) -> na::Vector3<f64> {
+    let mut cross_product = v1.cross(&v2);
+    let mut normal: na::Vector3<f64> = na::Vector3::zeros();
+    normal.copy_from(&cross_product);
+    normal = normalize(normal);
+    normal
+}
+
 #[derive(Clone)]
 struct Polygon {
     vertices: na::DMatrix<f64>,
@@ -156,7 +186,8 @@ impl Polygon {
     }
     fn intersection(&self, ray: &Ray) -> na::Vector3<f64> {
         let point_on_plane = self.get_vertex(0);
-        let t: f64 = -(self.normal.dot(&point_on_plane) - self.normal.dot(&ray.pos))/self.normal.dot(&ray.dir);
+        // minus sign issue here
+        let t: f64 = (self.normal.dot(&point_on_plane) - self.normal.dot(&ray.pos))/self.normal.dot(&ray.dir);
         ray.pos+ray.dir*t
     }
     fn get_vertex(&self, vertex_index: usize) -> na::Vector3<f64> {
@@ -166,32 +197,36 @@ impl Polygon {
         return_vec
     }
     fn is_inside(&self, point_of_intersection: &na::Vector3<f64>) -> bool {
+        // todo: add bounds check here
         let mut edges: Vec<na::Vector3<f64>> = vec![];
         edges.push(self.get_vertex(1)-self.get_vertex(0));
         edges.push(self.get_vertex(2)-self.get_vertex(1));
         edges.push(self.get_vertex(0)-self.get_vertex(2));
+        let point_of_intersection_2d: na::Vector3<f64> = na::Vector3::new(point_of_intersection[0], point_of_intersection[1], 0.0);
         let mut results: Vec<f64> = vec![0.0, 0.0, 0.0];
-        for (edge_num, edge) in edges.into_iter().enumerate() {
-            let test = self.get_vertex(edge_num) - point_of_intersection;
-            results[edge_num] = edge.dot(&test);
+        for (edge_num, edge) in edges.clone().into_iter().enumerate() {
+            let edge_tangent = self.get_vertex(edge_num) - point_of_intersection_2d;
+            let edge_normal: na::Vector3<f64> = na::Vector3::new(edge_tangent[1], -edge_tangent[0], 0.0);
+            results[edge_num] = edge.dot(&edge_normal);
         }
         let mut inside_flag = true;
-        println!("{:?}", results);
-        for result in results {
-            if result > 0.0 || result.is_nan() || result.is_infinite() {
+        for result in results.clone().into_iter() {
+            if result > 0.0 || result.is_nan() {
                 inside_flag = false;
+            }
+            if result == 0.0 {
+                assert![1==0];
             }
         }
         inside_flag
     }
 }
 
-
-
 #[pymodule]
 fn rtlib(py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<Ray>();
     m.add_class::<Polyhedron>();
+    m.add_class::<Scene>();
 
     Ok(())
 }
