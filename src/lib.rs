@@ -32,6 +32,7 @@ impl Ray {
     }
 }
 
+// convenience struct for importing geometry. only used in Polyhedron::new()
 struct RawGeometric {
     raw_obj_vertices: Vec<na::RowVector3<f64>>,
     raw_obj_faces: Vec<Vec<usize>>
@@ -41,6 +42,8 @@ impl RawGeometric {
     fn new() -> RawGeometric {
         RawGeometric { raw_obj_vertices: vec![], raw_obj_faces: vec![] }
     }
+
+    // conversion from RawGeometric to Polyhedron
     fn convert(self) -> Polyhedron {
         let position: na::Vector3<f64> = na::Vector3::new(0.0, 0.0, 0.0);
         let mut polyhedron_face_list: Vec<Polygon> = vec![];
@@ -65,6 +68,7 @@ impl RawGeometric {
     }
 }
 
+// python scene object. polyhedrons are added to it using scene.add() on the python side
 #[pyclass(name=scene)]
 struct Scene {
     objects: Vec<Polyhedron>
@@ -76,10 +80,13 @@ impl Scene {
     fn new() -> Scene {
         Scene { objects: vec![] }
     }
+
     fn add(&mut self, polyhedron: Polyhedron) -> PyResult<()> {
         self.objects.push(polyhedron);
         Ok(())
     }
+
+    // main loop for ray tracing in a scene
     fn propagate(&self, ray: &Ray) -> PyResult<()> {
         // todo: nohit handling
         let hit_face: &Polygon = self.calculate_hit(ray).unwrap();
@@ -116,9 +123,10 @@ impl Scene {
         }
         Err(NoHit::new("No hit."))
     }
-    // fn calculate_next_rays
+    // todo: fn calculate_next_rays
 }
 
+// error class incase no surface is hit
 #[derive(Debug)]
 struct NoHit {
     details: String
@@ -142,10 +150,13 @@ impl Error for NoHit {
     }
 }
 
+// 3d object class for python
 #[pyclass(name=poly3d)]
 #[derive(Clone)]
 struct Polyhedron {
     faces: Vec<Polygon>,
+    // vertices and indices are in the .obj form, 
+    // just here for reference, for now. unused
     vertices: na::DMatrix<f64>,
     indices: na::DMatrix<usize>,
     position: na::Vector3<f64>
@@ -153,6 +164,8 @@ struct Polyhedron {
 
 #[pymethods]
 impl Polyhedron {
+    // constructor parses .obj file into RawGeometry struct,
+    // and then converts that into Polyhedron and Polygon structs
     #[new]
     fn new(filename: &str) -> Polyhedron {
         let document = std::fs::read_to_string(filename).unwrap();
@@ -198,12 +211,14 @@ impl Polyhedron {
     }
 }
 
+// convenience function for normalizing a vector
 fn normalize(vector: na::Vector3<f64>) -> na::Vector3<f64> {
     let norm: f64 = (vector[0].powf(2.0) + vector[1].powf(2.0) + vector[2].powf(2.0)).sqrt();
     assert![norm > 0.0];
     vector / norm
 }
 
+// convenience function for a normalized cross product
 fn normal_cross(v1: na::Vector3<f64>, v2: na::Vector3<f64>) -> na::Vector3<f64> {
     let mut cross_product = v1.cross(&v2);
     let mut normal: na::Vector3<f64> = na::Vector3::zeros();
@@ -212,6 +227,7 @@ fn normal_cross(v1: na::Vector3<f64>, v2: na::Vector3<f64>) -> na::Vector3<f64> 
     normal
 }
 
+// struct representing a collection of three vertices 
 #[derive(Clone)]
 struct Polygon {
     vertices: na::DMatrix<f64>,
@@ -219,6 +235,7 @@ struct Polygon {
 }
 
 impl Polygon {
+    // this is called when the polyhedron is generating its facets
     fn new(vertices_matrix: na::DMatrix<f64>) -> Polygon {
         let edge_0 = vertices_matrix.row(1) - vertices_matrix.row(0);
         let edge_1 = vertices_matrix.row(2) - vertices_matrix.row(1);
@@ -231,18 +248,21 @@ impl Polygon {
             normal: normal,
         }
     }
+    // intersection of ray with self
     fn intersection(&self, ray: &Ray) -> na::Vector3<f64> {
         let point_on_plane = self.get_vertex(0);
         // minus sign issue here
         let t: f64 = (self.normal.dot(&point_on_plane) - self.normal.dot(&ray.pos))/self.normal.dot(&ray.dir);
         ray.pos+ray.dir*t
     }
+    // convenience function for pulling a specific vertex
     fn get_vertex(&self, vertex_index: usize) -> na::Vector3<f64> {
         let point = self.vertices.row(vertex_index).transpose();
         let mut return_vec: na::Vector3<f64> = na::Vector3::zeros();
         return_vec.copy_from(&point);
         return_vec
     }
+    // hit detection between ray and self
     fn is_inside(&self, point_of_intersection: &na::Vector3<f64>) -> bool {
         // todo: add bounds check here
         let mut edges: Vec<na::Vector3<f64>> = vec![];
@@ -252,9 +272,14 @@ impl Polygon {
         let plane_normal: na::Vector3<f64> = normal_cross(edges[0], edges[1]);
         let mut results: Vec<f64> = vec![0.0, 0.0, 0.0];
         for (edge_num, edge) in edges.clone().into_iter().enumerate() {
+            // edge is the tangent vector
+            // edge_normal is the outward-oriented normal vector in the plane of the polygon
             let edge_normal: na::Vector3<f64> = normal_cross(edge, plane_normal);
             results[edge_num] = (self.get_vertex(edge_num) - point_of_intersection).dot(&edge_normal);
         }
+        // POI is inside if the dot product between the edge normals and a vector pointing from POI to the edge
+        // is positive for each side
+        // if the dot product is ever zero, then the ray is clipping an edge
         let mut is_inside_on_all_sides = false;
         let mut inside_flag: Vec<bool> = vec![false, false, false];
         let mut edge_clip_flag = false;
@@ -271,6 +296,7 @@ impl Polygon {
         }
         is_inside_on_all_sides = inside_flag.into_iter().all(|x| x);
         if is_inside_on_all_sides && edge_clip_flag {
+            // need to handle this later, but for now, just panic if we clip an edge
             assert![1==0]
         }
         is_inside_on_all_sides
