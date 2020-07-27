@@ -3,7 +3,10 @@ use pyo3::prelude::*;
 use regex as re;
 use std;
 use std::iter::FromIterator;
+use std::fmt;
+use std::error::Error;
 use pyo3::types::{PyList};
+use std::cmp::Ordering;
 
 #[pyclass(name=ray)]
 #[derive(Clone)]
@@ -26,22 +29,6 @@ impl Ray {
             color: na::Vector3::from_vec(pcolor),
             shadow: false
         }
-    }
-    fn propagate(&self, scene: &Scene) -> PyResult<()> {
-        // todo: add filtering 
-        for polyhedron in scene.objects.clone().into_iter() {
-            let faces = polyhedron.faces.clone();
-            let mut intersections: Vec<na::Vector3<f64>> = vec![];
-            for face in faces.into_iter() {
-                let point_of_intersection = face.intersection(self);
-                if face.is_inside(&point_of_intersection) {
-                    println!("poi is {}", point_of_intersection);
-                    intersections.push(point_of_intersection);
-                    // surfaces.push(&face);
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -92,6 +79,66 @@ impl Scene {
     fn add(&mut self, polyhedron: Polyhedron) -> PyResult<()> {
         self.objects.push(polyhedron);
         Ok(())
+    }
+    fn propagate(&self, ray: &Ray) -> PyResult<()> {
+        // todo: nohit handling
+        let hit_face: &Polygon = self.calculate_hit(ray).unwrap();
+        println!("{}", hit_face.vertices);
+        println!("{}", hit_face.normal);
+        Ok(())
+    }
+}
+
+impl Scene {
+    fn calculate_hit(&self, ray: &Ray) -> Result<&Polygon, NoHit> {
+        // todo: add filtering 
+        for polyhedron in self.objects.iter() {
+            let faces = &polyhedron.faces;
+            let mut intersections: Vec<na::Vector3<f64>> = vec![];
+            let mut matching_faces: Vec<&Polygon> = vec![];
+            for face in faces.iter() {
+                let point_of_intersection = face.intersection(&ray);
+                if face.is_inside(&point_of_intersection) {
+                    if (point_of_intersection - ray.pos).dot(&ray.dir) > 0.0 {
+                        matching_faces.push(&face);
+                    }
+                }
+            }
+            let mut result: Vec<f64> = matching_faces.clone().into_iter().map(|x| (*x).distance_from_ray(ray)).collect();
+            let index_of_min: Option<usize> = result
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+                .map(|(index, _)| index);
+            let hit_face_index: usize = index_of_min.unwrap();
+            let return_face = matching_faces[hit_face_index];
+            return Ok(return_face);
+        }
+        Err(NoHit::new("No hit."))
+    }
+    // fn calculate_next_rays
+}
+
+#[derive(Debug)]
+struct NoHit {
+    details: String
+}
+
+impl NoHit {
+    fn new(msg: &str) -> NoHit {
+        NoHit { details: msg.to_string() }
+    }
+}
+
+impl fmt::Display for NoHit {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f,"{}",self.details)
+    }
+}
+
+impl Error for NoHit {
+    fn description(&self) -> &str {
+        &self.details
     }
 }
 
@@ -157,7 +204,7 @@ fn normalize(vector: na::Vector3<f64>) -> na::Vector3<f64> {
     vector / norm
 }
 
-fn normal_check(v1: na::Vector3<f64>, v2: na::Vector3<f64>) -> na::Vector3<f64> {
+fn normal_cross(v1: na::Vector3<f64>, v2: na::Vector3<f64>) -> na::Vector3<f64> {
     let mut cross_product = v1.cross(&v2);
     let mut normal: na::Vector3<f64> = na::Vector3::zeros();
     normal.copy_from(&cross_product);
@@ -199,26 +246,39 @@ impl Polygon {
     fn is_inside(&self, point_of_intersection: &na::Vector3<f64>) -> bool {
         // todo: add bounds check here
         let mut edges: Vec<na::Vector3<f64>> = vec![];
-        edges.push(self.get_vertex(1)-self.get_vertex(0));
-        edges.push(self.get_vertex(2)-self.get_vertex(1));
-        edges.push(self.get_vertex(0)-self.get_vertex(2));
-        let point_of_intersection_2d: na::Vector3<f64> = na::Vector3::new(point_of_intersection[0], point_of_intersection[1], 0.0);
+        edges.push(normalize(self.get_vertex(1)-self.get_vertex(0)));
+        edges.push(normalize(self.get_vertex(2)-self.get_vertex(1)));
+        edges.push(normalize(self.get_vertex(0)-self.get_vertex(2)));
+        let plane_normal: na::Vector3<f64> = normal_cross(edges[0], edges[1]);
         let mut results: Vec<f64> = vec![0.0, 0.0, 0.0];
         for (edge_num, edge) in edges.clone().into_iter().enumerate() {
-            let edge_tangent = self.get_vertex(edge_num) - point_of_intersection_2d;
-            let edge_normal: na::Vector3<f64> = na::Vector3::new(edge_tangent[1], -edge_tangent[0], 0.0);
-            results[edge_num] = edge.dot(&edge_normal);
+            let edge_normal: na::Vector3<f64> = normal_cross(edge, plane_normal);
+            results[edge_num] = (self.get_vertex(edge_num) - point_of_intersection).dot(&edge_normal);
         }
-        let mut inside_flag = true;
-        for result in results.clone().into_iter() {
-            if result > 0.0 || result.is_nan() {
-                inside_flag = false;
+        let mut is_inside_on_all_sides = false;
+        let mut inside_flag: Vec<bool> = vec![false, false, false];
+        let mut edge_clip_flag = false;
+        for (edgenum, result) in results.clone().into_iter().enumerate() {
+            if result.is_nan() {
+                inside_flag[edgenum] = false;
+            }
+            else if result > 0.0 {
+                inside_flag[edgenum] = true;
             }
             if result == 0.0 {
-                assert![1==0];
+                edge_clip_flag = true;
             }
         }
-        inside_flag
+        is_inside_on_all_sides = inside_flag.into_iter().all(|x| x);
+        if is_inside_on_all_sides && edge_clip_flag {
+            assert![1==0]
+        }
+        is_inside_on_all_sides
+    }
+    fn distance_from_ray(&self, ray: &Ray) -> f64 {
+        let intersection = self.intersection(ray);
+        let distance = (ray.pos - intersection).norm();
+        distance
     }
 }
 
