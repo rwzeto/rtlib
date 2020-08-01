@@ -8,10 +8,6 @@ edition = "2018"
 name = "rtlib"
 crate-type = ["cdylib"]
 
-[[bin]]
-name = "rtlib_test"
-path = "src/main.rs"
-
 [dependencies]
 nalgebra = "0.21.1"
 regex = "1.3.9"
