@@ -2,9 +2,11 @@ use nalgebra as na;
 use pyo3::prelude::*;
 use regex as re;
 use std;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::error::Error;
 use std::fmt;
+use std::rc::Rc;
 
 // convenience function for converting pylist to matrix
 fn list_to_matrix(input: Vec<Vec<f64>>) -> na::Matrix3<f64> {
@@ -36,6 +38,11 @@ fn reflection_matrix(nhat: na::Vector3<f64>) -> na::Matrix3<f64> {
     na::Matrix3::identity() - 2.0 * nhat * nhat.transpose()
 }
 
+fn distance(p1: na::Vector3<f64>, p2: na::Vector3<f64>) -> f64 {
+    let diff = p2 - p1;
+    (diff[0].powf(2.0) + diff[1].powf(2.0) + diff[2].powf(2.0)).sqrt()
+}
+
 #[pyclass(name=ray)]
 #[derive(Clone, Debug)]
 struct Ray {
@@ -51,20 +58,33 @@ struct Ray {
 impl Ray {
     #[new]
     fn new(
-        ppower: f64,
-        pindex: f64,
-        ppos: Vec<f64>,
-        pdir: Vec<f64>,
-        pcolor: Vec<f64>,
+        power: f64,
+        index: f64,
+        pos: Vec<f64>,
+        dir: Vec<f64>,
+        color: Vec<f64>,
         shadow: bool,
     ) -> Ray {
         Ray {
-            power: ppower,
-            index: pindex,
-            pos: na::Vector3::from_vec(ppos),
-            dir: na::Vector3::from_vec(pdir),
-            color: na::Vector3::from_vec(pcolor),
+            power: power,
+            index: index,
+            pos: na::Vector3::from_vec(pos),
+            dir: na::Vector3::from_vec(dir),
+            color: na::Vector3::from_vec(color),
             shadow: false,
+        }
+    }
+}
+
+impl Ray {
+    fn black(pos: na::Vector3<f64>, dir: na::Vector3<f64>) -> Ray {
+        Ray {
+            power: 0.0,
+            index: 1.0,
+            pos: pos,
+            dir: dir,
+            color: na::Vector3::<f64>::zeros(),
+            shadow: false
         }
     }
 }
@@ -73,8 +93,9 @@ impl fmt::Display for Ray {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "-- ray pow: {}\npos: [{}, {}, {}]\ndir: [{}, {}, {}]",
+            "-- ray pow: {}, n: {}\npos: [{}, {}, {}]\ndir: [{}, {}, {}]",
             self.power,
+            self.index,
             self.pos[0],
             self.pos[1],
             self.pos[2],
@@ -100,7 +121,14 @@ impl RawGeometric {
     }
 
     // conversion from RawGeometric to Polyhedron
-    fn convert(self, index: f64, pos: Vec<f64>, rot: Vec<Vec<f64>>) -> Polyhedron {
+    fn convert(
+        self,
+        index: f64,
+        pos: Vec<f64>,
+        rot: Vec<Vec<f64>>,
+        transmissivity: f64,
+        reflectivity: f64,
+    ) -> Polyhedron {
         let mut polyhedron_face_list: Vec<Polygon> = vec![];
         let rot_matrix: na::Matrix3<f64> = list_to_matrix(rot);
         for (index_num, index_vector) in self.raw_obj_faces.into_iter().enumerate() {
@@ -123,6 +151,8 @@ impl RawGeometric {
             rot: rot_matrix,
             pos: na::Vector3::from_vec(pos),
             faces: polyhedron_face_list,
+            transmissivity: transmissivity,
+            reflectivity: reflectivity,
         }
     }
 }
@@ -143,15 +173,33 @@ impl RayTree {
     fn push_child(&mut self, child_node: RayTree) -> () {
         self.childs.push(child_node);
     }
+    fn calculate_shadow_rays(&self, lights: &Vec<Light>, storage_pixel: Rc<RefCell<f64>>) -> () {
+        fn search_tree(tree: &RayTree, lights: &Vec<Light>, storage_pixel: Rc<RefCell<f64>>) -> () {
+            if tree.childs.len() == 0 {
+                let mut pixel = storage_pixel.borrow_mut();
+                let mut pixel_adjustment: f64 = 0.0;
+                for light in lights.iter() {
+                    let dist: f64 = distance(tree.ray.pos, light.pos);
+                    pixel_adjustment += light.power / dist.powf(2.0) * tree.ray.power;
+                }
+                *pixel = *pixel + pixel_adjustment;
+            };
+            for child in tree.childs.iter() {
+                search_tree(child, lights, Rc::clone(&storage_pixel));
+            }
+        };
+        search_tree(self, lights, Rc::clone(&storage_pixel));
+    }
 }
 
 #[pymethods]
 impl RayTree {
     fn print(&self) -> () {
+        println!("{}", self.ray);
         if self.childs.len() == 0 {
+            println!("end branch");
             return ();
         }
-        println!("{}", self.ray);
         for child in self.childs.iter() {
             child.print();
         }
@@ -162,6 +210,7 @@ impl RayTree {
 #[pyclass(name=scene)]
 struct Scene {
     polyhedrons: Vec<Polyhedron>,
+    lights: Vec<Light>,
 }
 
 #[pymethods]
@@ -170,15 +219,20 @@ impl Scene {
     fn new() -> Scene {
         Scene {
             polyhedrons: vec![],
+            lights: vec![],
         }
     }
 
-    fn add(&mut self, mut polyhedron: Polyhedron) -> PyResult<()> {
+    fn add_obj(&mut self, mut polyhedron: Polyhedron) -> PyResult<()> {
         let polyhedron_id: usize = self.polyhedrons.len();
         for polygon in polyhedron.faces.iter_mut() {
             polygon.parent = polyhedron_id;
         }
         self.polyhedrons.push(polyhedron);
+        Ok(())
+    }
+    fn add_light(&mut self, light: Light) -> PyResult<()> {
+        self.lights.push(light);
         Ok(())
     }
 
@@ -188,13 +242,16 @@ impl Scene {
             Ok(hit_face) => hit_face,
             Err(nohit) => {
                 return RayTree {
-                    ray: ray,
+                    ray: Ray::black(ray.pos, ray.dir),
                     childs: vec![],
                 }
             }
         };
         let n = self.polyhedrons[hit_face.parent].index;
-        let next_rays: Vec<Ray> = hit_face.calculate_next_rays(&ray, n);
+        let transmissivity = self.polyhedrons[hit_face.parent].transmissivity;
+        let reflectivity = self.polyhedrons[hit_face.parent].reflectivity;
+        let next_rays: Vec<Ray> =
+            hit_face.calculate_next_rays(&ray, n, transmissivity, reflectivity);
         let mut result = RayTree {
             ray: ray,
             childs: vec![],
@@ -203,6 +260,13 @@ impl Scene {
             result.push_child(self.propagate(next_ray));
         }
         result
+    }
+    fn render(&self, propagated_rays: &RayTree) -> PyResult<f64> {
+        let storage_pixel: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
+        propagated_rays.calculate_shadow_rays(&self.lights, Rc::clone(&storage_pixel));
+        // println!("{}", storage_pixel.borrow());
+        let x = Ok(*storage_pixel.borrow());
+        x
     }
 }
 
@@ -251,6 +315,8 @@ struct Polyhedron {
     faces: Vec<Polygon>,
     pos: na::Vector3<f64>,
     rot: na::Matrix3<f64>,
+    transmissivity: f64,
+    reflectivity: f64,
 }
 
 #[pymethods]
@@ -258,7 +324,14 @@ impl Polyhedron {
     // constructor parses .obj file into RawGeometry struct,
     // and then converts that into Polyhedron and Polygon structs
     #[new]
-    fn new(filename: &str, index: f64, pos: Vec<f64>, rot: Vec<Vec<f64>>) -> Polyhedron {
+    fn new(
+        filename: &str,
+        index: f64,
+        pos: Vec<f64>,
+        rot: Vec<Vec<f64>>,
+        transmissivity: f64,
+        reflectivity: f64,
+    ) -> Polyhedron {
         let document = std::fs::read_to_string(filename).unwrap();
         let vertex_token = re::Regex::new("(v )").unwrap();
         let num_token = re::Regex::new("[+-]?([0-9]*[.])?[0-9]+").unwrap();
@@ -295,7 +368,7 @@ impl Polyhedron {
                 new_obj.raw_obj_faces.push(vertex_indices)
             }
         }
-        new_obj.convert(index, pos, rot)
+        new_obj.convert(index, pos, rot, transmissivity, reflectivity)
     }
 }
 
@@ -381,7 +454,13 @@ impl Polygon {
         let distance = (ray.pos - intersection).norm();
         distance
     }
-    fn calculate_next_rays(&self, incident_ray: &Ray, n: f64) -> Vec<Ray> {
+    fn calculate_next_rays(
+        &self,
+        incident_ray: &Ray,
+        n: f64,
+        transmissivity: f64,
+        reflectivity: f64,
+    ) -> Vec<Ray> {
         // reflected ray
         let mut exiting: bool = false;
         let mut n_relative: f64 = 1.0 / n;
@@ -389,9 +468,10 @@ impl Polygon {
         if incident_ray.dir.dot(&self.normal) > 0.0 {
             exiting = true;
             n_relative = n;
+            surface_normal = -surface_normal;
         }
         let mut reflected_ray = Ray {
-            power: incident_ray.power,
+            power: incident_ray.power * reflectivity,
             index: 0.0,
             pos: self.intersection(incident_ray),
             dir: incident_ray.dir,
@@ -399,21 +479,71 @@ impl Polygon {
             shadow: false,
         };
         let mut refracted_ray = Ray {
-            power: incident_ray.power * 0.1,
+            power: incident_ray.power * transmissivity,
             index: 0.0,
             pos: self.intersection(incident_ray),
             dir: incident_ray.dir,
             color: incident_ray.color,
             shadow: false,
         };
+        let terminal_ray = Ray {
+            power: incident_ray.power,
+            index: 0.0,
+            pos: self.intersection(incident_ray),
+            dir: incident_ray.dir,
+            color: incident_ray.color,
+            shadow: true,
+        };
         let reflected_dir = reflection_matrix(surface_normal) * incident_ray.dir;
-        let refracted_dir = ( -n_relative * surface_normal.dot(&incident_ray.dir)
-            - (1.0 - n_relative.powf(2.0) * (1.0 - surface_normal.dot(&incident_ray.dir).powf(2.0)))
+        let refracted_dir = (-n_relative * surface_normal.dot(&incident_ray.dir)
+            - (1.0
+                - n_relative.powf(2.0) * (1.0 - surface_normal.dot(&incident_ray.dir).powf(2.0)))
             .sqrt())
             * surface_normal
             + n_relative * incident_ray.dir;
-        
-        vec![reflected_ray, refracted_ray]
+
+        reflected_ray.dir = reflected_dir;
+        refracted_ray.dir = refracted_dir;
+
+        if exiting {
+            reflected_ray.index = n;
+            refracted_ray.index = 1.0;
+        } else {
+            reflected_ray.index = 1.0;
+            refracted_ray.index = n;
+        }
+
+        let mut return_rays: Vec<Ray> = vec![];
+
+        for ray in vec![reflected_ray, refracted_ray].into_iter() {
+            if ray.power > 0.1 && ray.shadow == false {
+                return_rays.push(ray);
+            }
+        }
+        if return_rays.len() == 0 && incident_ray.power > 0.0 && incident_ray.shadow == false {
+            return_rays.push(terminal_ray);
+        }
+        return_rays
+    }
+}
+
+#[pyclass(name=light)]
+#[derive(Clone, Debug)]
+struct Light {
+    pos: na::Vector3<f64>,
+    power: f64,
+    color: na::Vector3<f64>,
+}
+
+#[pymethods]
+impl Light {
+    #[new]
+    fn new(pos: Vec<f64>, power: f64, color: Vec<f64>) -> Light {
+        Light {
+            power: power,
+            pos: na::Vector3::from_vec(pos),
+            color: na::Vector3::from_vec(color),
+        }
     }
 }
 
@@ -449,5 +579,6 @@ fn rtlib(py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<Polyhedron>();
     m.add_class::<Scene>();
     m.add_class::<RayTree>();
+    m.add_class::<Light>();
     Ok(())
 }
