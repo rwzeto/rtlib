@@ -71,7 +71,7 @@ impl Ray {
             pos: na::Vector3::from_vec(pos),
             dir: na::Vector3::from_vec(dir),
             color: na::Vector3::from_vec(color),
-            shadow: false,
+            shadow: shadow,
         }
     }
 }
@@ -84,7 +84,7 @@ impl Ray {
             pos: pos,
             dir: dir,
             color: na::Vector3::<f64>::zeros(),
-            shadow: false
+            shadow: false,
         }
     }
 }
@@ -131,7 +131,7 @@ impl RawGeometric {
     ) -> Polyhedron {
         let mut polyhedron_face_list: Vec<Polygon> = vec![];
         let rot_matrix: na::Matrix3<f64> = list_to_matrix(rot);
-        for (index_num, index_vector) in self.raw_obj_faces.into_iter().enumerate() {
+        for index_vector in self.raw_obj_faces.into_iter() {
             let M_rows: usize = index_vector.len();
             let N_cols: usize = 3;
             let mut polygon_vertices_matrix: na::DMatrix<f64> = na::DMatrix::zeros(M_rows, N_cols);
@@ -164,12 +164,6 @@ struct RayTree {
 }
 
 impl RayTree {
-    fn new(first_ray_segment: Ray) -> RayTree {
-        RayTree {
-            ray: first_ray_segment,
-            childs: vec![],
-        }
-    }
     fn push_child(&mut self, child_node: RayTree) -> () {
         self.childs.push(child_node);
     }
@@ -275,7 +269,6 @@ impl Scene {
         // todo: add filtering
         for polyhedron in self.polyhedrons.iter() {
             let faces = &polyhedron.faces;
-            let intersections: Vec<na::Vector3<f64>> = vec![];
             let mut matching_faces: Vec<&Polygon> = vec![];
             for face in faces.iter() {
                 let point_of_intersection = face.intersection(&ray);
