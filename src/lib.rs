@@ -51,40 +51,22 @@ struct Ray {
     pos: na::Vector3<f64>,
     dir: na::Vector3<f64>,
     color: na::Vector3<f64>,
-    shadow: bool,
+    last_ray: bool,
+    first_ray: bool,
 }
 
 #[pymethods]
 impl Ray {
     #[new]
-    fn new(
-        power: f64,
-        index: f64,
-        pos: Vec<f64>,
-        dir: Vec<f64>,
-        color: Vec<f64>,
-        shadow: bool,
-    ) -> Ray {
+    fn new(index: f64, pos: Vec<f64>, dir: Vec<f64>, color: Vec<f64>) -> Ray {
         Ray {
-            power: power,
+            power: 1.0,
             index: index,
             pos: na::Vector3::from_vec(pos),
             dir: na::Vector3::from_vec(dir),
             color: na::Vector3::from_vec(color),
-            shadow: shadow,
-        }
-    }
-}
-
-impl Ray {
-    fn black(pos: na::Vector3<f64>, dir: na::Vector3<f64>) -> Ray {
-        Ray {
-            power: 0.0,
-            index: 1.0,
-            pos: pos,
-            dir: dir,
-            color: na::Vector3::<f64>::zeros(),
-            shadow: false,
+            last_ray: false,
+            first_ray: true,
         }
     }
 }
@@ -93,9 +75,10 @@ impl fmt::Display for Ray {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "-- ray pow: {}, n: {}\npos: [{}, {}, {}]\ndir: [{}, {}, {}]",
+            "-- ray pow: {}, n: {}, 1st: {}\npos: [{}, {}, {}]\ndir: [{}, {}, {}]",
             self.power,
             self.index,
+            self.first_ray,
             self.pos[0],
             self.pos[1],
             self.pos[2],
@@ -157,49 +140,6 @@ impl RawGeometric {
     }
 }
 
-#[pyclass(name=raytree)]
-struct RayTree {
-    ray: Ray,
-    childs: Vec<RayTree>,
-}
-
-impl RayTree {
-    fn push_child(&mut self, child_node: RayTree) -> () {
-        self.childs.push(child_node);
-    }
-    fn calculate_shadow_rays(&self, lights: &Vec<Light>, storage_pixel: Rc<RefCell<f64>>) -> () {
-        fn search_tree(tree: &RayTree, lights: &Vec<Light>, storage_pixel: Rc<RefCell<f64>>) -> () {
-            if tree.childs.len() == 0 {
-                let mut pixel = storage_pixel.borrow_mut();
-                let mut pixel_adjustment: f64 = 0.0;
-                for light in lights.iter() {
-                    let dist: f64 = distance(tree.ray.pos, light.pos);
-                    pixel_adjustment += light.power / dist.powf(2.0) * tree.ray.power;
-                }
-                *pixel = *pixel + pixel_adjustment;
-            };
-            for child in tree.childs.iter() {
-                search_tree(child, lights, Rc::clone(&storage_pixel));
-            }
-        };
-        search_tree(self, lights, Rc::clone(&storage_pixel));
-    }
-}
-
-#[pymethods]
-impl RayTree {
-    fn print(&self) -> () {
-        println!("{}", self.ray);
-        if self.childs.len() == 0 {
-            println!("end branch");
-            return ();
-        }
-        for child in self.childs.iter() {
-            child.print();
-        }
-    }
-}
-
 // python scene object. polyhedrons are added to it using scene.add() on the python side
 #[pyclass(name=scene)]
 struct Scene {
@@ -229,42 +169,47 @@ impl Scene {
         self.lights.push(light);
         Ok(())
     }
-
-    // main loop for ray tracing in a scene
-    fn propagate(&self, ray: Ray) -> RayTree {
-        let hit_face: &Polygon = match self.calculate_hit(&ray) {
-            Ok(hit_face) => hit_face,
-            Err(nohit) => {
-                return RayTree {
-                    ray: Ray::black(ray.pos, ray.dir),
-                    childs: vec![],
-                }
-            }
-        };
-        let n = self.polyhedrons[hit_face.parent].index;
-        let transmissivity = self.polyhedrons[hit_face.parent].transmissivity;
-        let reflectivity = self.polyhedrons[hit_face.parent].reflectivity;
-        let next_rays: Vec<Ray> =
-            hit_face.calculate_next_rays(&ray, n, transmissivity, reflectivity);
-        let mut result = RayTree {
-            ray: ray,
-            childs: vec![],
-        };
-        for next_ray in next_rays.into_iter() {
-            result.push_child(self.propagate(next_ray));
-        }
-        result
-    }
-    fn render(&self, propagated_rays: &RayTree) -> PyResult<f64> {
+    fn render(&self, ray: Ray) -> PyResult<f64> {
         let storage_pixel: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
-        propagated_rays.calculate_shadow_rays(&self.lights, Rc::clone(&storage_pixel));
-        // println!("{}", storage_pixel.borrow());
-        let x = Ok(*storage_pixel.borrow());
-        x
+        Ok(self.propagate(ray, &self.lights, Rc::clone(&storage_pixel)))
     }
 }
 
 impl Scene {
+    // main loop for ray tracing in a scene
+    fn propagate(&self, ray: Ray, lights: &Vec<Light>, pixel: Rc<RefCell<f64>>) -> f64 {
+        if ray.last_ray == false {
+            let hit_face: &Polygon = match self.calculate_hit(&ray) {
+                Ok(hit_face) => hit_face,
+                Err(_) => {
+                    return self.last_ray_ray_calc(ray, lights, Rc::clone(&pixel));
+                }
+            };
+            let n = self.polyhedrons[hit_face.parent].index;
+            let transmissivity = self.polyhedrons[hit_face.parent].transmissivity;
+            let reflectivity = self.polyhedrons[hit_face.parent].reflectivity;
+            let next_rays = hit_face.calculate_next_rays(&ray, n, transmissivity, reflectivity);
+            for nextray in next_rays.into_iter() {
+                return self.propagate(nextray, lights, Rc::clone(&pixel));
+            }
+        } else {
+            return self.last_ray_ray_calc(ray, lights, Rc::clone(&pixel));
+        }
+        assert![1==0, "propagate logic issue"];
+        0.0
+    }
+    fn last_ray_ray_calc(&self, ray: Ray, lights: &Vec<Light>, pixel: Rc<RefCell<f64>>) -> f64 {
+        let mut storage_pixel = *pixel.borrow_mut();
+        let mut pixel_adjustment: f64 = 0.0;
+        if !ray.first_ray {
+            for light in lights.iter() {
+                let dist: f64 = distance(ray.pos, light.pos);
+                pixel_adjustment += light.power / dist.powf(2.0) * ray.power;
+            }
+        }
+        storage_pixel = storage_pixel + pixel_adjustment;
+        storage_pixel
+    }
     fn calculate_hit(&self, ray: &Ray) -> Result<&Polygon, NoHit> {
         // todo: add filtering
         for polyhedron in self.polyhedrons.iter() {
@@ -424,22 +369,14 @@ impl Polygon {
         // if the dot product is ever zero, then the ray is clipping an edge
         let mut is_inside_on_all_sides = false;
         let mut inside_flag: Vec<bool> = vec![false, false, false];
-        let mut edge_clip_flag = false;
         for (edgenum, result) in results.clone().into_iter().enumerate() {
             if result.is_nan() {
                 inside_flag[edgenum] = false;
-            } else if result > 0.0 {
+            } else if result >= 0.0 {
                 inside_flag[edgenum] = true;
-            }
-            if result == 0.0 {
-                edge_clip_flag = true;
             }
         }
         is_inside_on_all_sides = inside_flag.into_iter().all(|x| x);
-        if is_inside_on_all_sides && edge_clip_flag {
-            // need to handle this later, but for now, just panic if we clip an edge
-            assert![1 == 0]
-        }
         is_inside_on_all_sides
     }
     fn distance_from_ray(&self, ray: &Ray) -> f64 {
@@ -469,7 +406,8 @@ impl Polygon {
             pos: self.intersection(incident_ray),
             dir: incident_ray.dir,
             color: incident_ray.color,
-            shadow: false,
+            last_ray: false,
+            first_ray: false,
         };
         let mut refracted_ray = Ray {
             power: incident_ray.power * transmissivity,
@@ -477,7 +415,8 @@ impl Polygon {
             pos: self.intersection(incident_ray),
             dir: incident_ray.dir,
             color: incident_ray.color,
-            shadow: false,
+            last_ray: false,
+            first_ray: false,
         };
         let terminal_ray = Ray {
             power: incident_ray.power,
@@ -485,7 +424,8 @@ impl Polygon {
             pos: self.intersection(incident_ray),
             dir: incident_ray.dir,
             color: incident_ray.color,
-            shadow: true,
+            last_ray: true,
+            first_ray: false,
         };
         let reflected_dir = reflection_matrix(surface_normal) * incident_ray.dir;
         let refracted_dir = (-n_relative * surface_normal.dot(&incident_ray.dir)
@@ -509,11 +449,11 @@ impl Polygon {
         let mut return_rays: Vec<Ray> = vec![];
 
         for ray in vec![reflected_ray, refracted_ray].into_iter() {
-            if ray.power > 0.1 && ray.shadow == false {
+            if ray.power > 0.1 && ray.last_ray == false {
                 return_rays.push(ray);
             }
         }
-        if return_rays.len() == 0 && incident_ray.power > 0.0 && incident_ray.shadow == false {
+        if return_rays.len() == 0 && incident_ray.last_ray == false {
             return_rays.push(terminal_ray);
         }
         return_rays
@@ -571,7 +511,6 @@ fn rtlib(py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<Ray>();
     m.add_class::<Polyhedron>();
     m.add_class::<Scene>();
-    m.add_class::<RayTree>();
     m.add_class::<Light>();
     Ok(())
 }
