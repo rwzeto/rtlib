@@ -71,6 +71,20 @@ impl Ray {
     }
 }
 
+impl Ray {
+    fn shadow(pos: na::Vector3<f64>, dir: na::Vector3<f64>) -> Ray {
+        Ray {
+            power: 1.0,
+            index: 0.0,
+            pos: pos,
+            dir: normalize(dir),
+            color: na::Vector3::<f64>::zeros(),
+            first_ray: true,
+            last_ray: false,
+        }
+    }
+}
+
 impl fmt::Display for Ray {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -169,7 +183,7 @@ impl Scene {
         self.lights.push(light);
         Ok(())
     }
-    fn render(&self, ray: Ray) -> PyResult<f64> {
+    fn render(&self, ray: &Ray) -> PyResult<f64> {
         let storage_pixel: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
         Ok(self.propagate(ray, &self.lights, Rc::clone(&storage_pixel)))
     }
@@ -177,38 +191,75 @@ impl Scene {
 
 impl Scene {
     // main loop for ray tracing in a scene
-    fn propagate(&self, ray: Ray, lights: &Vec<Light>, pixel: Rc<RefCell<f64>>) -> f64 {
+    fn propagate(&self, ray: &Ray, lights: &Vec<Light>, pixel: Rc<RefCell<f64>>) -> f64 {
         if ray.last_ray == false {
             let hit_face: &Polygon = match self.calculate_hit(&ray) {
                 Ok(hit_face) => hit_face,
                 Err(_) => {
-                    return self.last_ray_ray_calc(ray, lights, Rc::clone(&pixel));
+                    return self.last_ray_calc(ray, lights, Rc::clone(&pixel));
                 }
             };
             let n = self.polyhedrons[hit_face.parent].index;
             let transmissivity = self.polyhedrons[hit_face.parent].transmissivity;
             let reflectivity = self.polyhedrons[hit_face.parent].reflectivity;
             let next_rays = hit_face.calculate_next_rays(&ray, n, transmissivity, reflectivity);
-            for nextray in next_rays.into_iter() {
+            for nextray in next_rays.iter() {
                 return self.propagate(nextray, lights, Rc::clone(&pixel));
             }
         } else {
-            return self.last_ray_ray_calc(ray, lights, Rc::clone(&pixel));
+            return self.last_ray_calc(ray, lights, Rc::clone(&pixel));
         }
-        assert![1==0, "propagate logic issue"];
+        assert![1 == 0, "propagate logic issue"];
         0.0
     }
-    fn last_ray_ray_calc(&self, ray: Ray, lights: &Vec<Light>, pixel: Rc<RefCell<f64>>) -> f64 {
+    fn last_ray_calc(&self, ray: &Ray, lights: &Vec<Light>, pixel: Rc<RefCell<f64>>) -> f64 {
         let mut storage_pixel = *pixel.borrow_mut();
         let mut pixel_adjustment: f64 = 0.0;
         if !ray.first_ray {
             for light in lights.iter() {
+                let shadow_ray: Ray = Ray::shadow(ray.pos, light.pos - ray.pos);
+                let obstructions = self.sample_shadow_ray_path(&shadow_ray);
                 let dist: f64 = distance(ray.pos, light.pos);
-                pixel_adjustment += light.power / dist.powf(2.0) * ray.power;
+                pixel_adjustment += obstructions * light.power / dist.powf(2.0) * ray.power;
             }
         }
         storage_pixel = storage_pixel + pixel_adjustment;
         storage_pixel
+    }
+    // for now, keep it simple.
+    // sample surface properties in a straight line to the light source
+    fn sample_shadow_ray_path(&self, shadow_ray: &Ray) -> f64 {
+        // from ray.pos to light source
+        // calculate intersections
+        let mut transmission_coefficient: f64 = 1.0;
+        let hit_faces: Vec<&Polygon> = match self.calculate_all_forward_hits(shadow_ray) {
+            Ok(hit_face) => hit_face,
+            Err(_) => return 1.0,
+        };
+        for face in hit_faces.into_iter() {
+            let transmissivity = self.polyhedrons[face.parent].transmissivity;
+            transmission_coefficient = transmission_coefficient * transmissivity;
+        }
+        transmission_coefficient
+    }
+    fn calculate_all_forward_hits(&self, ray: &Ray) -> Result<Vec<&Polygon>, NoHit> {
+        let mut matching_faces: Vec<&Polygon> = vec![];
+        for polyhedron in self.polyhedrons.iter() {
+            let faces = &polyhedron.faces;
+            for face in faces.iter() {
+                let point_of_intersection = face.intersection(&ray);
+                if face.is_inside(&point_of_intersection) {
+                    if (point_of_intersection - ray.pos).dot(&ray.dir) > 0.0 {
+                        matching_faces.push(&face);
+                    }
+                }
+            }
+        }
+        if matching_faces.len() > 0 {
+            Ok(matching_faces)
+        } else {
+            Err(NoHit::new("No hit"))
+        }
     }
     fn calculate_hit(&self, ray: &Ray) -> Result<&Polygon, NoHit> {
         // todo: add filtering
@@ -241,7 +292,6 @@ impl Scene {
         }
         Err(NoHit::new("No hit."))
     }
-    // todo: fn calculate_next_rays
 }
 
 // 3d object class for python

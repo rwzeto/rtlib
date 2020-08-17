@@ -1,6 +1,6 @@
 /target
 Cargo.lock
-test_script.py
 data/*
 src/main.rs
 todo.txt
+*.png
